@@ -4,12 +4,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"uvpn/internal/client"
+	"uvpn/internal/sub"
 	"uvpn/internal/tunnel"
 	"uvpn/internal/wg"
 )
@@ -46,6 +48,8 @@ func main() {
 		err = cmdDisconnect(os.Args[2:])
 	case "env":
 		err = cmdEnv(os.Args[2:])
+	case "serve":
+		err = cmdServe(os.Args[2:])
 	case "ip":
 		err = cmdIP(os.Args[2:])
 	case "test":
@@ -303,4 +307,40 @@ func validWord(v bool) string {
 		return "valid"
 	}
 	return "expired, reconnect"
+}
+
+// cmdServe runs a local HTTP server exposing a Happ-compatible subscription.
+// Every request to /sub regenerates the server list and mints fresh per-server
+// proxy tokens, because Urban VPN proxy credentials are short-lived.
+func cmdServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1", "listen address")
+	port := fs.Int("port", 8787, "listen port")
+	fs.Parse(args)
+	listen := fmt.Sprintf("%s:%d", *addr, *port)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sub", func(w http.ResponseWriter, r *http.Request) {
+		body, err := sub.Build()
+		if err != nil {
+			http.Error(w, "subscription build failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("profile-title", "uvpn")
+		w.Header().Set("profile-update-interval", "1")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sub", http.StatusFound)
+	})
+
+	fmt.Printf("uvpn subscription service listening on http://%s\n", listen)
+	fmt.Printf("Happ sub link:  http://%s/sub\n", listen)
+	fmt.Println("note: Urban VPN proxy tokens are short-lived; re-fetch picks up fresh ones")
+	return http.ListenAndServe(listen, mux)
 }
